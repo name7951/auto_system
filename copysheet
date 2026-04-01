@@ -1,0 +1,206 @@
+// ==========================
+// 📌 공통 설정
+// ==========================
+const CONFIG = {
+  folderId: "1wLzvk42O0FTQf4WIp0_CDQagpXbnfchC", // 기존에 있던 리포트를 복사해서 옮기려고 하는 파일
+  // '월'이 바뀔 때마다 새로운 파일 생성해서 그 파일의 링크 수정
+
+  sourceSpreadsheetId: "1xYrXAmVUox5TVs47YME_sZFEfM_19yeffBdwEJQHMgI", // 동향백데이터 시트 파일 이름
+  sourceSheetName: "Main", // 동향백데이터 시트 탭
+
+  dropdownCell: "E1", // 드롭박스 셀
+  dropdownValue: "ODIN:VALHALLA RISING", // 드롭박스에서 선택할 게임 이름
+
+  targetSheetName: "CS" // 동향백데이터를 복사해서 붙일 탭
+};
+
+
+
+// ==========================
+// 📌 공휴일 체크 함수
+// ==========================
+function isKoreanHoliday(date) {
+
+  // ❗ 안전 처리 (에러 방지)
+  if (!date) return false;
+
+  const safeDate = new Date(date);
+  if (isNaN(safeDate)) return false;
+
+  // ✅ 2026 공휴일 목록 (사용자 지정)
+  const holidays = [
+    "2026-05-05", "2026-05-25",
+    "2026-06-03", "2026-06-06",
+    "2026-07-17",
+    "2026-08-15", "2026-08-17",
+    "2026-09-24", "2026-09-25", "2026-09-26",
+    "2026-10-05", "2026-10-09",
+    "2026-12-25"
+  ];
+
+  const formatted = Utilities.formatDate(
+    safeDate,
+    Session.getScriptTimeZone(),
+    "yyyy-MM-dd"
+  );
+
+  return holidays.includes(formatted);
+}
+
+
+// ==========================
+// 📌 주말 + 공휴일 통합 체크
+// ==========================
+function isHolidayOrWeekend() {
+  const today = new Date();
+  const day = today.getDay();
+
+  const weekend = (day === 0 || day === 6);
+  const holiday = isKoreanHoliday(today);
+
+  return weekend || holiday;
+}
+
+
+
+// ==========================
+// 🌙 1️⃣ 파일 복사 & 이름 변경
+// ==========================
+function copySheetDaily() {
+
+  // ❗ 주말/공휴일 차단
+  if (isHolidayOrWeekend()) {
+    Logger.log("주말 또는 공휴일이라 실행 안 함");
+    return;
+  }
+
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const file = DriveApp.getFileById(spreadsheet.getId());
+  const folder = DriveApp.getFolderById(CONFIG.folderId);
+
+  const today = new Date();
+
+  // 복사본 생성 (이틀 전)
+  const twoDaysAgo = new Date(today);
+  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+
+  const copyDateStr = Utilities.formatDate(twoDaysAgo, Session.getScriptTimeZone(), "yyMMdd");
+  const copyName = "[오딘 글로벌] Report_" + copyDateStr;
+
+  file.makeCopy(copyName, folder);
+  Logger.log("복사본 생성 완료: " + copyName);
+
+  // 원본 이름 변경 (하루 전)
+  const oneDayAgo = new Date(today);
+  oneDayAgo.setDate(oneDayAgo.getDate() - 1);
+
+  const originalDateStr = Utilities.formatDate(oneDayAgo, Session.getScriptTimeZone(), "yyMMdd");
+  const newOriginalName = "[오딘 글로벌] Report_" + originalDateStr;
+
+  file.setName(newOriginalName);
+  Logger.log("원본 이름 변경 완료");
+}
+
+
+
+// ==========================
+// ☀️ 2️⃣ 데이터 수집
+// ==========================
+function smartAppendFromDate() {
+
+  // ❗ 주말/공휴일 차단
+  if (isHolidayOrWeekend()) {
+    Logger.log("주말 또는 공휴일이라 실행 안 함");
+    return;
+  }
+
+  const sourceSS = SpreadsheetApp.openById(CONFIG.sourceSpreadsheetId);
+  const sourceSheet = sourceSS.getSheetByName(CONFIG.sourceSheetName);
+
+  // 드롭다운 설정
+  sourceSheet.getRange(CONFIG.dropdownCell).setValue(CONFIG.dropdownValue);
+  SpreadsheetApp.flush();
+  Utilities.sleep(3000);
+
+  const sourceData = sourceSheet.getDataRange().getValues();
+
+  // 날짜 계산
+  const today = new Date();
+
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+
+  const tenDaysAgo = new Date(today);
+  tenDaysAgo.setDate(today.getDate() - 10);
+
+  // 데이터 필터
+  let newData = sourceData.filter((row, index) => {
+    if (index < 6) return false;
+
+    const date = new Date(row[0]);
+    return date >= tenDaysAgo && date <= yesterday;
+  });
+
+  // 데이터 없으면 종료
+  if (newData.length === 0) {
+    Logger.log("가져올 데이터 없음");
+    return;
+  }
+
+  // 정렬
+  newData.sort((a, b) => new Date(a[0]) - new Date(b[0]));
+
+  const targetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.targetSheetName);
+  const existingData = targetSheet.getDataRange().getValues();
+
+  // 시작 위치 찾기
+  const firstNewDate = new Date(newData[0][0]).toDateString();
+
+  let startRow = existingData.length + 1;
+
+  for (let i = 1; i < existingData.length; i++) {
+    const date = new Date(existingData[i][0]).toDateString();
+
+    if (date === firstNewDate) {
+      startRow = i + 1;
+      break;
+    }
+  }
+
+  // 덮어쓰기
+  targetSheet.getRange(startRow, 1, newData.length, newData[0].length)
+    .setValues(newData);
+
+  Logger.log("데이터 업데이트 완료 (시작 행: " + startRow + ")");
+}
+
+
+
+// ==========================
+// ⚙️ 3️⃣ 트리거 설정
+// ==========================
+function setupTriggers() {
+
+  const triggers = ScriptApp.getProjectTriggers();
+
+  // 기존 트리거 삭제
+  triggers.forEach(trigger => ScriptApp.deleteTrigger(trigger));
+
+  // 자정 실행
+  ScriptApp.newTrigger("copySheetDaily")
+    .timeBased()
+    .everyDays(1)
+    .atHour(0)
+    .nearMinute(0)
+    .create();
+
+  // 오전 10시 실행 (원하면 시간 변경 가능)
+  ScriptApp.newTrigger("smartAppendFromDate")
+    .timeBased()
+    .everyDays(1)
+    .atHour(10)
+    .nearMinute(0)
+    .create();
+
+  Logger.log("트리거 설정 완료");
+}
